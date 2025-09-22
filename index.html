@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <title>Mapa – Escolas Públicas (Fundamental) – PB</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <style>
+    html, body { margin: 0; height: 100%; display: flex; flex-direction: column; }
+    #container { display: flex; flex: 1; }
+    #mapa { flex: 1; height: 95vh; }
+    #detalhe-container { flex: 1; display: flex; flex-direction: column; border-left: 1px solid #ccc; }
+    #controls { padding: 8px; font-family: sans-serif; border-bottom: 1px solid #ccc; }
+    #detalhe { flex: 1; }
+    button { margin: 4px; }
+
+    /* Dropdown customizado */
+    .dropdown {
+      position: relative;
+      display: inline-block;
+      width: 95%;
+    }
+    .dropdown-btn {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #aaa;
+      cursor: pointer;
+      background: #fff;
+      text-align: left;
+    }
+    .dropdown-content {
+      display: none;
+      position: absolute;
+      background: #fff;
+      border: 1px solid #aaa;
+      max-height: 250px;
+      overflow-y: auto;
+      width: 100%;
+      z-index: 10;
+    }
+    .dropdown-content input[type="text"] {
+      width: 95%;
+      margin: 6px auto;
+      display: block;
+      padding: 4px;
+    }
+    .dropdown-content label {
+      display: block;
+      padding: 4px 8px;
+      cursor: pointer;
+    }
+    .dropdown-content label:hover {
+      background: #f0f0f0;
+    }
+    .dropdown-content input[type="checkbox"] {
+      margin-right: 6px;
+    }
+    .checked {
+      background: #d0ebff;
+    }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <strong>Filtro fixo:</strong> Escolas Públicas (Municipal/Estadual) | Ensino Fundamental
+  </div>
+  <div id="container">
+    <div id="mapa"></div>
+    <div id="detalhe-container">
+      <div id="controls">
+        <button id="selectAll">Marcar tudo</button>
+        <button id="deselectAll">Desmarcar tudo</button><br/>
+        
+        <!-- Novo seletor de indicador -->
+        <label for="indicadorSelect"><strong>Indicador:</strong></label>
+        <select id="indicadorSelect">
+          <option value="ideb">IDEB</option>
+          <option value="aprovacao">Aprovação (%)</option>
+          <option value="abandono">Abandono (%)</option>
+        </select><br/><br/>
+
+        <div class="dropdown">
+          <div class="dropdown-btn">Selecionar escolas ▼</div>
+          <div id="schoolDropdown" class="dropdown-content">
+            <input type="text" id="searchBox" placeholder="Buscar escola..." />
+            <div id="schoolList"></div>
+          </div>
+        </div>
+      </div>
+      <div id="detalhe"></div>
+    </div>
+  </div>
+
+  <script>
+    const chartMapa = echarts.init(document.getElementById('mapa'));
+    const chartDetalhe = echarts.init(document.getElementById('detalhe'));
+    let escolasRaw = [];
+    let todasEscolasMunicipio = [];
+    let municipioAtual = "";
+    let indicadorAtual = "ideb"; // padrão
+    let anosGlobais = [];
+
+    // Títulos bonitos
+    const titulos = {
+      ideb: "IDEB",
+      aprovacao: "Taxa de Aprovação (%)",
+      abandono: "Taxa de Abandono (%)"
+    };
+
+    // Dropdown toggle
+    document.addEventListener("click", e => {
+      const dropdown = document.querySelector(".dropdown-content");
+      const btn = document.querySelector(".dropdown-btn");
+      if (btn.contains(e.target)) {
+        dropdown.style.display = dropdown.style.display === "block" ? "none" : "block";
+      } else if (!dropdown.contains(e.target)) {
+        dropdown.style.display = "none";
+      }
+    });
+
+    // Carrega shape da Paraíba
+    fetch("paraiba_municipios.geojson")
+      .then(res => res.json())
+      .then(geoJson => {
+        echarts.registerMap('Paraiba', geoJson);
+
+        Papa.parse("indicadores_escolares_pb.csv", {
+          download: true,
+          header: false,
+          complete: function(results) {
+            const data = results.data;
+
+            escolasRaw = data.map(row => ({
+              nome: row[1],
+              rede: row[2],
+              etapa: row[3],
+              municipio: row[5],
+              ano: row[6],
+              ideb: parseFloat(row[7]),
+              aprovacao: parseFloat(row[8]),
+              abandono: parseFloat(row[10])
+            }));
+
+            const publicasFund = escolasRaw.filter(e =>
+              (e.rede === "Municipal" || e.rede === "Estadual") &&
+              e.etapa === "Fundamental"
+            );
+
+            anosGlobais = [...new Set(publicasFund.map(e => e.ano))].sort();
+
+            // Inicializa mapa
+            atualizarMapa(publicasFund);
+
+            // Evento troca de indicador
+            document.getElementById("indicadorSelect").onchange = (e) => {
+              indicadorAtual = e.target.value;
+              atualizarMapa(publicasFund);
+              if (municipioAtual) atualizarDetalhe(municipioAtual);
+            };
+          }
+        });
+      });
+
+    // === MAPA ===
+    function atualizarMapa(publicasFund) {
+      const agregados = {};
+      publicasFund.forEach(e => {
+        const key = `${e.municipio}_${e.ano}`;
+        if (!agregados[key]) {
+          agregados[key] = { municipio: e.municipio, ano: e.ano, count: 0, ideb: 0, aprovacao: 0, abandono: 0 };
+        }
+        agregados[key].count++;
+        agregados[key].ideb += e.ideb || 0;
+        agregados[key].aprovacao += e.aprovacao || 0;
+        agregados[key].abandono += e.abandono || 0;
+      });
+
+      const dadosPorAno = {};
+      anosGlobais.forEach(ano => {
+        dadosPorAno[ano] = Object.values(agregados)
+          .filter(e => e.ano == ano)
+          .map(e => ({
+            name: e.municipio,
+            value: (e[indicadorAtual] / e.count).toFixed(2)
+          }));
+      });
+
+      const optionMapa = {
+        baseOption: {
+          timeline: { axisType: 'category', autoPlay: false, data: anosGlobais },
+          visualMap: {
+            min: 0, max: indicadorAtual === "ideb" ? 10 : 100,
+            text: [`Alto ${titulos[indicadorAtual]}`, `Baixo ${titulos[indicadorAtual]}`],
+            calculable: true,
+            inRange: { color: ['#ff6b6b', '#ffd93d', '#6bcb77'] }
+          },
+          tooltip: {
+            trigger: 'item',
+            formatter: p => p.data ? `<strong>${p.name}</strong><br/>${titulos[indicadorAtual]} médio: ${p.data.value}` : `${p.name}<br/>Sem dados`
+          },
+          series: [{ type: 'map', map: 'Paraiba', roam: true }]
+        },
+        options: anosGlobais.map(ano => ({
+          title: { text: `${titulos[indicadorAtual]} Médio por Município - ${ano}`, left: 'center' },
+          series: [{ data: dadosPorAno[ano] }]
+        }))
+      };
+
+      chartMapa.setOption(optionMapa);
+
+      chartMapa.off("click");
+      chartMapa.on("click", params => {
+        if (!params.name) return;
+        municipioAtual = params.name;
+        atualizarDetalhe(municipioAtual);
+      });
+    }
+
+    // === DETALHE ===
+    function atualizarDetalhe(municipio) {
+      const escolasMunicipio = escolasRaw.filter(e => e.municipio === municipio);
+      todasEscolasMunicipio = [...new Set(escolasMunicipio.map(e => e.nome))].sort();
+
+      const list = document.getElementById("schoolList");
+      list.innerHTML = "";
+      todasEscolasMunicipio.forEach(nome => {
+        const label = document.createElement("label");
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.value = nome;
+        cb.checked = true;
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(" " + nome));
+        label.classList.add("checked");
+        cb.addEventListener("change", () => {
+          label.classList.toggle("checked", cb.checked);
+          desenharDetalhe(escolasMunicipio, municipio);
+        });
+        list.appendChild(label);
+      });
+
+      document.getElementById("selectAll").onclick = () => {
+        list.querySelectorAll("input").forEach(cb => {
+          cb.checked = true;
+          cb.parentElement.classList.add("checked");
+        });
+        desenharDetalhe(escolasMunicipio, municipio);
+      };
+      document.getElementById("deselectAll").onclick = () => {
+        list.querySelectorAll("input").forEach(cb => {
+          cb.checked = false;
+          cb.parentElement.classList.remove("checked");
+        });
+        desenharDetalhe(escolasMunicipio, municipio);
+      };
+
+      document.getElementById("searchBox").oninput = (e) => {
+        const termo = e.target.value.toLowerCase();
+        list.querySelectorAll("label").forEach(lab => {
+          const txt = lab.textContent.toLowerCase();
+          lab.style.display = txt.includes(termo) ? "block" : "none";
+        });
+      };
+
+      desenharDetalhe(escolasMunicipio, municipio);
+    }
+
+    function desenharDetalhe(escolasMunicipio, municipio) {
+      const selecionadas = [...document.querySelectorAll("#schoolList input:checked")].map(cb => cb.value);
+
+      const series = selecionadas.map(nome => {
+        const escola = escolasMunicipio.filter(e => e.nome === nome);
+        return {
+          name: nome,
+          type: 'line',
+          data: anosGlobais.map(ano => {
+            const match = escola.find(e => e.ano == ano);
+            return match ? match[indicadorAtual] : null;
+          }),
+          connectNulls: true,
+          showSymbol: true
+        };
+      });
+
+      chartDetalhe.setOption({
+        title: { text: `Evolução de ${titulos[indicadorAtual]} - ${municipio}`, left: 'center' },
+        tooltip: { trigger: 'axis' },
+        legend: { type: 'scroll', bottom: 0, data: selecionadas },
+        xAxis: { type: 'category', data: anosGlobais },
+        yAxis: { type: 'value', min: 0, max: indicadorAtual === "ideb" ? 10 : 100 },
+        series
+      }, true);
+    }
+  </script>
+</body>
+</html>
